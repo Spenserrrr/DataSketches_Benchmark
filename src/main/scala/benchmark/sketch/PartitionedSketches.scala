@@ -6,7 +6,7 @@ import org.apache.datasketches.memory.Memory
 import org.apache.datasketches.theta.{SetOperation, Sketches, UpdateSketch}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.col
-import org.apache.spark.sql.types.{DoubleType, StructField, StructType}
+import org.apache.spark.sql.types.{BinaryType, DoubleType, StructField, StructType}
 
 import scala.collection.mutable
 
@@ -31,6 +31,60 @@ object PartitionedSketches {
       globalEstimate(spark, input, query.distinctColumn, sketchType, lgK)
     } else {
       groupedEstimate(spark, input, query, sketchType, lgK)
+    }
+  }
+
+  def buildSketchTable(
+      spark: SparkSession,
+      input: DataFrame,
+      groupColumns: Seq[String],
+      distinctColumn: String,
+      sketchType: SketchType,
+      lgK: Int
+  ): DataFrame = {
+    require(groupColumns.nonEmpty, "Materialized sketch tables require at least one group column")
+
+    val groupCount = groupColumns.length
+    val selectedColumns = (groupColumns :+ distinctColumn).map(col)
+    val outputSchema = StructType(groupColumns.map(name => input.schema(name)) :+ StructField("sketch_bytes", BinaryType, nullable = false))
+
+    val partitionSketches = input
+      .select(selectedColumns: _*)
+      .rdd
+      .mapPartitions { rows =>
+        val sketchesByGroup = mutable.HashMap.empty[Vector[Any], MutableSketch]
+
+        rows.foreach { row =>
+          val key = (0 until groupCount).map(row.get).toVector
+          val sketch = sketchesByGroup.getOrElseUpdate(key, newMutableSketch(sketchType, lgK))
+          updateIfPresent(sketch, row.get(groupCount))
+        }
+
+        sketchesByGroup.iterator.map { case (key, sketch) =>
+          key -> sketch.toBytes
+        }
+      }
+      .reduceByKey { (left, right) =>
+        mergeSketches(sketchType, lgK, left, right)
+      }
+      .map { case (key, bytes) =>
+        Row.fromSeq(key :+ bytes)
+      }
+
+    spark.createDataFrame(partitionSketches, outputSchema)
+  }
+
+  def estimateFromSketchTable(
+      spark: SparkSession,
+      sketchTable: DataFrame,
+      targetGroupColumns: Seq[String],
+      sketchType: SketchType,
+      lgK: Int
+  ): DataFrame = {
+    if (targetGroupColumns.isEmpty) {
+      estimateGlobalFromSketchTable(spark, sketchTable, sketchType, lgK)
+    } else {
+      estimateGroupedFromSketchTable(spark, sketchTable, targetGroupColumns, sketchType, lgK)
     }
   }
 
@@ -93,6 +147,54 @@ object PartitionedSketches {
     val mergedSketches = partitionSketches.reduceByKey { (left, right) =>
       mergeSketches(sketchType, lgK, left, right)
     }
+
+    val rows = mergedSketches.map { case (key, bytes) =>
+      Row.fromSeq(key :+ estimateSketch(sketchType, bytes))
+    }
+
+    spark.createDataFrame(rows, outputSchema)
+  }
+
+  private def estimateGlobalFromSketchTable(
+      spark: SparkSession,
+      sketchTable: DataFrame,
+      sketchType: SketchType,
+      lgK: Int
+  ): DataFrame = {
+    import spark.implicits._
+
+    val mergedBytes = sketchTable
+      .select(col("sketch_bytes"))
+      .rdd
+      .map(row => row.getAs[Array[Byte]]("sketch_bytes"))
+      .fold(emptySketch(sketchType, lgK)) { (left, right) =>
+        mergeSketches(sketchType, lgK, left, right)
+      }
+
+    Seq(Tuple1(estimateSketch(sketchType, mergedBytes))).toDF("distinct_count")
+  }
+
+  private def estimateGroupedFromSketchTable(
+      spark: SparkSession,
+      sketchTable: DataFrame,
+      targetGroupColumns: Seq[String],
+      sketchType: SketchType,
+      lgK: Int
+  ): DataFrame = {
+    val groupCount = targetGroupColumns.length
+    val selectedColumns = (targetGroupColumns :+ "sketch_bytes").map(col)
+    val outputSchema = StructType(targetGroupColumns.map(name => sketchTable.schema(name)) :+ StructField("distinct_count", DoubleType, nullable = false))
+
+    val mergedSketches = sketchTable
+      .select(selectedColumns: _*)
+      .rdd
+      .map { row =>
+        val key = (0 until groupCount).map(row.get).toVector
+        key -> row.getAs[Array[Byte]](groupCount)
+      }
+      .reduceByKey { (left, right) =>
+        mergeSketches(sketchType, lgK, left, right)
+      }
 
     val rows = mergedSketches.map { case (key, bytes) =>
       Row.fromSeq(key :+ estimateSketch(sketchType, bytes))

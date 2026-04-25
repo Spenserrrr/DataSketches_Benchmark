@@ -1,6 +1,7 @@
 package benchmark
 
 import benchmark.data.DatasetLoader
+import benchmark.materialization.MaterializationBenchmark
 import benchmark.sketch.{PartitionedSketches, SketchFunctions}
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
@@ -39,6 +40,17 @@ object BenchmarkRunner {
 
       val outputPath = ResultWriter.writeResults(results, runDirectory)
       println(s"Wrote ${results.size} benchmark rows to $outputPath")
+
+      val materializationOutputPath = MaterializationBenchmark.run(
+        spark = spark,
+        config = config,
+        input = input,
+        inputRows = inputRows,
+        exactQueries = exactQueries(spark),
+        queries = BenchmarkQueries.AllQueries,
+        runDirectory = runDirectory
+      )
+      println(s"Wrote materialization results to $materializationOutputPath")
     } finally {
       spark.stop()
     }
@@ -76,25 +88,33 @@ object BenchmarkRunner {
     exactResult +: approximateResults
   }
 
-  private def approximateMethods(config: BenchmarkConfig): Seq[ApproxMethod] =
+  private def approximateMethods(config: BenchmarkConfig): Seq[ApproxMethod] = {
+    val directUdafMethods =
+      if (config.includeDirectUdaf) {
+        Seq(
+          ApproxMethod(
+            name = "datasketches_theta_udaf",
+            run = (spark, _, query) => timedQuery(spark, query.sketchSql(DatasetLoader.ViewName, SketchFunctions.ThetaFunctionName)),
+            relativeSd = None,
+            notes = s"Apache DataSketches Theta direct UDAF; lgK=${config.thetaLgK}"
+          ),
+          ApproxMethod(
+            name = "datasketches_hll_udaf",
+            run = (spark, _, query) => timedQuery(spark, query.sketchSql(DatasetLoader.ViewName, SketchFunctions.HllFunctionName)),
+            relativeSd = None,
+            notes = s"Apache DataSketches HLL direct UDAF; lgK=${config.hllLgK}"
+          )
+        )
+      } else {
+        Seq.empty
+      }
+
     Seq(
       ApproxMethod(
         name = "spark_approx_count_distinct",
         run = (spark, _, query) => timedQuery(spark, query.approxSql(DatasetLoader.ViewName, config.relativeSd)),
         relativeSd = Some(config.relativeSd),
         notes = "Spark built-in HLL++ approximation"
-      ),
-      ApproxMethod(
-        name = "datasketches_theta_udaf",
-        run = (spark, _, query) => timedQuery(spark, query.sketchSql(DatasetLoader.ViewName, SketchFunctions.ThetaFunctionName)),
-        relativeSd = None,
-        notes = s"Apache DataSketches Theta direct UDAF; lgK=${config.thetaLgK}"
-      ),
-      ApproxMethod(
-        name = "datasketches_hll_udaf",
-        run = (spark, _, query) => timedQuery(spark, query.sketchSql(DatasetLoader.ViewName, SketchFunctions.HllFunctionName)),
-        relativeSd = None,
-        notes = s"Apache DataSketches HLL direct UDAF; lgK=${config.hllLgK}"
       ),
       ApproxMethod(
         name = "datasketches_theta_partitioned",
@@ -110,7 +130,13 @@ object BenchmarkRunner {
         relativeSd = None,
         notes = s"Apache DataSketches HLL partition-level sketching; lgK=${config.hllLgK}"
       )
-    )
+    ) ++ directUdafMethods
+  }
+
+  private def exactQueries(spark: SparkSession): Map[String, (DataFrame, Long)] =
+    BenchmarkQueries.AllQueries.map { query =>
+      query.name -> timedQuery(spark, query.exactSql(DatasetLoader.ViewName))
+    }.toMap
 
   private def timedQuery(spark: SparkSession, sqlText: String): (DataFrame, Long) = {
     timedDataFrame(spark.sql(sqlText))

@@ -12,17 +12,13 @@ final case class BenchmarkConfig(
     relativeSd: Double = 0.05,
     thetaLgK: Int = 12,
     hllLgK: Int = 12,
+    includeDirectUdaf: Boolean = true,
     outputRoot: String = "results"
 )
 
 object BenchmarkConfig {
   def parse(args: Array[String]): BenchmarkConfig = {
-    val values = args.toList
-      .sliding(2, 2)
-      .collect { case flag :: value :: Nil if flag.startsWith("--") =>
-        flag.drop(2) -> value
-      }
-      .toMap
+    val values = parseValues(args.toList)
 
     BenchmarkConfig(
       dataset = values.getOrElse("dataset", "synthetic"),
@@ -36,7 +32,20 @@ object BenchmarkConfig {
       relativeSd = values.get("relative-sd").map(_.toDouble).getOrElse(0.05),
       thetaLgK = values.get("theta-lg-k").map(_.toInt).getOrElse(12),
       hllLgK = values.get("hll-lg-k").map(_.toInt).getOrElse(12),
+      includeDirectUdaf = !values.contains("skip-udaf") && !values.contains("skip-direct-udaf"),
       outputRoot = values.getOrElse("output-root", values.getOrElse("output", "results"))
     )
+  }
+
+  private def parseValues(args: List[String]): Map[String, String] = {
+    args match {
+      case Nil => Map.empty
+      case flag :: value :: rest if flag.startsWith("--") && !value.startsWith("--") =>
+        parseValues(rest) + (flag.drop(2) -> value)
+      case flag :: rest if flag.startsWith("--") =>
+        parseValues(rest) + (flag.drop(2) -> "true")
+      case _ :: rest =>
+        parseValues(rest)
+    }
   }
 }

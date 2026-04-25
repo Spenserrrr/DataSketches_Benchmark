@@ -4,6 +4,16 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions._
 
 object Metrics {
+  final case class ApproximationSummary(
+      numGroups: Long,
+      exactCardinality: Double,
+      approximateCardinality: Double,
+      errorMean: Double,
+      errorMedian: Double,
+      errorP95: Double,
+      errorMax: Double
+  )
+
   def exactResult(
       dataset: String,
       query: QuerySpec,
@@ -83,7 +93,7 @@ object Metrics {
         notes = notes
       )
     } else {
-      val summary = groupedApproxSummary(spark, query, exactDf, approxDf)
+      val summary = summarizeApproximation(spark, query, exactDf, approxDf)
       BenchmarkResult(
         dataset = dataset,
         queryName = query.name,
@@ -103,7 +113,31 @@ object Metrics {
     }
   }
 
-  private def groupedExactSummary(exactDf: DataFrame): GroupedSummary = {
+  def summarizeApproximation(
+      spark: SparkSession,
+      query: QuerySpec,
+      exactDf: DataFrame,
+      approxDf: DataFrame
+  ): ApproximationSummary = {
+    if (query.groupColumns.isEmpty) {
+      val exact = readCount(exactDf.first())
+      val approx = readCount(approxDf.first())
+      val error = relativeError(approx, exact)
+      ApproximationSummary(
+        numGroups = 1L,
+        exactCardinality = exact,
+        approximateCardinality = approx,
+        errorMean = error,
+        errorMedian = error,
+        errorP95 = error,
+        errorMax = error
+      )
+    } else {
+      groupedApproxSummary(spark, query, exactDf, approxDf)
+    }
+  }
+
+  private def groupedExactSummary(exactDf: DataFrame): ApproximationSummary = {
     val row = exactDf
       .agg(
         count(lit(1)).cast("long").as("num_groups"),
@@ -111,7 +145,7 @@ object Metrics {
       )
       .first()
 
-    GroupedSummary(
+    ApproximationSummary(
       numGroups = row.getAs[Long]("num_groups"),
       exactCardinality = row.getAs[Double]("exact_cardinality"),
       approximateCardinality = row.getAs[Double]("exact_cardinality"),
@@ -127,7 +161,7 @@ object Metrics {
       query: QuerySpec,
       exactDf: DataFrame,
       approxDf: DataFrame
-  ): GroupedSummary = {
+  ): ApproximationSummary = {
     import spark.implicits._
 
     val exactRenamed = exactDf.withColumnRenamed("distinct_count", "exact_count")
@@ -152,7 +186,7 @@ object Metrics {
       )
       .first()
 
-    GroupedSummary(
+    ApproximationSummary(
       numGroups = row.getAs[Long]("num_groups"),
       exactCardinality = row.getAs[Double]("exact_cardinality"),
       approximateCardinality = row.getAs[Double]("approximate_cardinality"),
@@ -169,13 +203,4 @@ object Metrics {
   private def relativeError(approx: Double, exact: Double): Double =
     if (exact == 0.0) 0.0 else math.abs(approx - exact) / exact
 
-  private final case class GroupedSummary(
-      numGroups: Long,
-      exactCardinality: Double,
-      approximateCardinality: Double,
-      errorMean: Double,
-      errorMedian: Double,
-      errorP95: Double,
-      errorMax: Double
-  )
 }
