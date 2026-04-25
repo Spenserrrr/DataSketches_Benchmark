@@ -11,6 +11,9 @@ final case class QuerySpec(
   def approxSql(tableName: String, relativeSd: Double): String =
     distinctSql(tableName, s"approx_count_distinct($distinctColumn, $relativeSd)")
 
+  def sketchSql(tableName: String, functionName: String): String =
+    distinctSql(tableName, s"$functionName($distinctColumn)")
+
   private def distinctSql(tableName: String, aggregate: String): String = {
     if (groupColumns.isEmpty) {
       s"SELECT $aggregate AS distinct_count FROM $tableName"

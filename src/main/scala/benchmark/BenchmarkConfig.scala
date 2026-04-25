@@ -6,6 +6,8 @@ final case class BenchmarkConfig(
     groups: Int = 100,
     partitions: Int = 4,
     relativeSd: Double = 0.05,
+    thetaLgK: Int = 12,
+    hllLgK: Int = 12,
     outputRoot: String = "results"
 )
 
@@ -24,6 +26,8 @@ object BenchmarkConfig {
       groups = values.get("groups").map(_.toInt).getOrElse(100),
       partitions = values.get("partitions").map(_.toInt).getOrElse(4),
       relativeSd = values.get("relative-sd").map(_.toDouble).getOrElse(0.05),
+      thetaLgK = values.get("theta-lg-k").map(_.toInt).getOrElse(12),
+      hllLgK = values.get("hll-lg-k").map(_.toInt).getOrElse(12),
       outputRoot = values.getOrElse("output-root", values.getOrElse("output", "results"))
     )
   }

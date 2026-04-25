@@ -6,7 +6,8 @@ lazy val root = (project in file("."))
   .settings(
     name := "datasketches-benchmark",
     libraryDependencies ++= Seq(
-      "org.apache.spark" %% "spark-sql" % "3.5.1"
+      "org.apache.spark" %% "spark-sql" % "3.5.1",
+      "org.apache.datasketches" % "datasketches-java" % "6.1.1"
     ),
     Compile / mainClass := Some("benchmark.BenchmarkRunner"),
     run / fork := true,

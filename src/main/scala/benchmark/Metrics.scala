@@ -49,23 +49,25 @@ object Metrics {
     }
   }
 
-  def approxResult(
+  def approximateResult(
       spark: SparkSession,
       query: QuerySpec,
+      method: String,
       exactDf: DataFrame,
       approxDf: DataFrame,
       inputRows: Long,
       runtimeMs: Long,
-      relativeSd: Double
+      relativeSd: Option[Double],
+      notes: String
   ): BenchmarkResult = {
     if (query.groupColumns.isEmpty) {
       val exact = readCount(exactDf.first())
       val approx = readCount(approxDf.first())
-      val error = relativeError(approx.toDouble, exact.toDouble)
+      val error = relativeError(approx, exact)
       BenchmarkResult(
         dataset = "synthetic",
         queryName = query.name,
-        method = "spark_approx_count_distinct",
+        method = method,
         inputRows = inputRows,
         numGroups = 1L,
         exactCardinality = exact,
@@ -75,15 +77,15 @@ object Metrics {
         relativeErrorMedian = error,
         relativeErrorP95 = error,
         relativeErrorMax = error,
-        relativeSd = Some(relativeSd),
-        notes = "Spark built-in HLL++ approximation"
+        relativeSd = relativeSd,
+        notes = notes
       )
     } else {
       val summary = groupedApproxSummary(spark, query, exactDf, approxDf)
       BenchmarkResult(
         dataset = "synthetic",
         queryName = query.name,
-        method = "spark_approx_count_distinct",
+        method = method,
         inputRows = inputRows,
         numGroups = summary.numGroups,
         exactCardinality = summary.exactCardinality,
@@ -93,8 +95,8 @@ object Metrics {
         relativeErrorMedian = summary.errorMedian,
         relativeErrorP95 = summary.errorP95,
         relativeErrorMax = summary.errorMax,
-        relativeSd = Some(relativeSd),
-        notes = "Spark built-in HLL++; cardinalities are sums over groups"
+        relativeSd = relativeSd,
+        notes = notes
       )
     }
   }
@@ -103,14 +105,14 @@ object Metrics {
     val row = exactDf
       .agg(
         count(lit(1)).cast("long").as("num_groups"),
-        sum(col("distinct_count")).cast("long").as("exact_cardinality")
+        sum(col("distinct_count")).cast("double").as("exact_cardinality")
       )
       .first()
 
     GroupedSummary(
       numGroups = row.getAs[Long]("num_groups"),
-      exactCardinality = row.getAs[Long]("exact_cardinality"),
-      approximateCardinality = row.getAs[Long]("exact_cardinality"),
+      exactCardinality = row.getAs[Double]("exact_cardinality"),
+      approximateCardinality = row.getAs[Double]("exact_cardinality"),
       errorMean = 0.0,
       errorMedian = 0.0,
       errorP95 = 0.0,
@@ -139,8 +141,8 @@ object Metrics {
     val row = joined
       .agg(
         count(lit(1)).cast("long").as("num_groups"),
-        sum(col("exact_count")).cast("long").as("exact_cardinality"),
-        sum(col("approx_count")).cast("long").as("approximate_cardinality"),
+        sum(col("exact_count")).cast("double").as("exact_cardinality"),
+        sum(col("approx_count")).cast("double").as("approximate_cardinality"),
         avg(col("relative_error")).as("error_mean"),
         expr("percentile_approx(relative_error, 0.5)").as("error_median"),
         expr("percentile_approx(relative_error, 0.95)").as("error_p95"),
@@ -150,8 +152,8 @@ object Metrics {
 
     GroupedSummary(
       numGroups = row.getAs[Long]("num_groups"),
-      exactCardinality = row.getAs[Long]("exact_cardinality"),
-      approximateCardinality = row.getAs[Long]("approximate_cardinality"),
+      exactCardinality = row.getAs[Double]("exact_cardinality"),
+      approximateCardinality = row.getAs[Double]("approximate_cardinality"),
       errorMean = row.getAs[Double]("error_mean"),
       errorMedian = row.getAs[Double]("error_median"),
       errorP95 = row.getAs[Double]("error_p95"),
@@ -159,16 +161,16 @@ object Metrics {
     )
   }
 
-  private def readCount(row: Row): Long =
-    row.getAs[Number]("distinct_count").longValue()
+  private def readCount(row: Row): Double =
+    row.getAs[Number]("distinct_count").doubleValue()
 
   private def relativeError(approx: Double, exact: Double): Double =
     if (exact == 0.0) 0.0 else math.abs(approx - exact) / exact
 
   private final case class GroupedSummary(
       numGroups: Long,
-      exactCardinality: Long,
-      approximateCardinality: Long,
+      exactCardinality: Double,
+      approximateCardinality: Double,
       errorMean: Double,
       errorMedian: Double,
       errorP95: Double,

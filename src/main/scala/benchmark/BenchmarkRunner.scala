@@ -2,9 +2,17 @@ package benchmark
 
 import java.nio.file.Path
 
+import benchmark.sketch.SketchFunctions
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
 object BenchmarkRunner {
+  private final case class ApproxMethod(
+      name: String,
+      sql: QuerySpec => String,
+      relativeSd: Option[Double],
+      notes: String
+  )
+
   def main(args: Array[String]): Unit = {
     val config = BenchmarkConfig.parse(args)
     val localParallelism = math.max(config.partitions, 1)
@@ -18,6 +26,7 @@ object BenchmarkRunner {
       .getOrCreate()
 
     spark.sparkContext.setLogLevel("WARN")
+    SketchFunctions.register(spark, config.thetaLgK, config.hllLgK)
 
     try {
       val runDirectory = ResultWriter.createRunDirectory(config.outputRoot)
@@ -60,22 +69,47 @@ object BenchmarkRunner {
 
     val (exactDf, exactRuntimeMs) =
       timedQuery(spark, query.exactSql(SyntheticData.ViewName))
-    val (approxDf, approxRuntimeMs) =
-      timedQuery(spark, query.approxSql(SyntheticData.ViewName, config.relativeSd))
 
-    Seq(
-      Metrics.exactResult(query, exactDf, inputRows, exactRuntimeMs),
-      Metrics.approxResult(
+    val exactResult = Metrics.exactResult(query, exactDf, inputRows, exactRuntimeMs)
+    val approximateResults = approximateMethods(config).map { method =>
+      val (approxDf, approxRuntimeMs) = timedQuery(spark, method.sql(query))
+      Metrics.approximateResult(
         spark = spark,
         query = query,
+        method = method.name,
         exactDf = exactDf,
         approxDf = approxDf,
         inputRows = inputRows,
         runtimeMs = approxRuntimeMs,
-        relativeSd = config.relativeSd
+        relativeSd = method.relativeSd,
+        notes = method.notes
+      )
+    }
+
+    exactResult +: approximateResults
+  }
+
+  private def approximateMethods(config: BenchmarkConfig): Seq[ApproxMethod] =
+    Seq(
+      ApproxMethod(
+        name = "spark_approx_count_distinct",
+        sql = _.approxSql(SyntheticData.ViewName, config.relativeSd),
+        relativeSd = Some(config.relativeSd),
+        notes = "Spark built-in HLL++ approximation"
+      ),
+      ApproxMethod(
+        name = "datasketches_theta",
+        sql = _.sketchSql(SyntheticData.ViewName, SketchFunctions.ThetaFunctionName),
+        relativeSd = None,
+        notes = s"Apache DataSketches Theta sketch; lgK=${config.thetaLgK}"
+      ),
+      ApproxMethod(
+        name = "datasketches_hll",
+        sql = _.sketchSql(SyntheticData.ViewName, SketchFunctions.HllFunctionName),
+        relativeSd = None,
+        notes = s"Apache DataSketches HLL sketch; lgK=${config.hllLgK}"
       )
     )
-  }
 
   private def timedQuery(spark: SparkSession, sqlText: String): (DataFrame, Long) = {
     val startNs = System.nanoTime()
