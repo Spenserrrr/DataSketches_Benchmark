@@ -1,0 +1,30 @@
+package benchmark
+
+final case class BenchmarkConfig(
+    rows: Long = 1000000L,
+    distinctValues: Long = 100000L,
+    groups: Int = 100,
+    partitions: Int = 4,
+    relativeSd: Double = 0.05,
+    outputRoot: String = "results"
+)
+
+object BenchmarkConfig {
+  def parse(args: Array[String]): BenchmarkConfig = {
+    val values = args.toList
+      .sliding(2, 2)
+      .collect { case flag :: value :: Nil if flag.startsWith("--") =>
+        flag.drop(2) -> value
+      }
+      .toMap
+
+    BenchmarkConfig(
+      rows = values.get("rows").map(_.toLong).getOrElse(1000000L),
+      distinctValues = values.get("distinct").map(_.toLong).getOrElse(100000L),
+      groups = values.get("groups").map(_.toInt).getOrElse(100),
+      partitions = values.get("partitions").map(_.toInt).getOrElse(4),
+      relativeSd = values.get("relative-sd").map(_.toDouble).getOrElse(0.05),
+      outputRoot = values.getOrElse("output-root", values.getOrElse("output", "results"))
+    )
+  }
+}
