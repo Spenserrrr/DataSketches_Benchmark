@@ -1,14 +1,13 @@
 package benchmark
 
-import java.nio.file.Path
-
-import benchmark.sketch.SketchFunctions
+import benchmark.data.DatasetLoader
+import benchmark.sketch.{PartitionedSketches, SketchFunctions}
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
 object BenchmarkRunner {
   private final case class ApproxMethod(
       name: String,
-      sql: QuerySpec => String,
+      run: (SparkSession, DataFrame, QuerySpec) => (DataFrame, Long),
       relativeSd: Option[Double],
       notes: String
   )
@@ -30,12 +29,12 @@ object BenchmarkRunner {
 
     try {
       val runDirectory = ResultWriter.createRunDirectory(config.outputRoot)
-      val input = materializeSyntheticData(spark, config, runDirectory).cache()
+      val input = DatasetLoader.loadAndMaterialize(spark, config, runDirectory).cache()
       val inputRows = input.count()
-      input.createOrReplaceTempView(SyntheticData.ViewName)
+      input.createOrReplaceTempView(DatasetLoader.ViewName)
 
-      val results = BenchmarkQueries.BaselineQueries.flatMap { query =>
-        runQueryPair(spark, config, query, inputRows)
+      val results = BenchmarkQueries.AllQueries.flatMap { query =>
+        runQueryPair(spark, config, input, query, inputRows)
       }
 
       val outputPath = ResultWriter.writeResults(results, runDirectory)
@@ -45,36 +44,24 @@ object BenchmarkRunner {
     }
   }
 
-  private def materializeSyntheticData(
-      spark: SparkSession,
-      config: BenchmarkConfig,
-      runDirectory: Path
-  ): DataFrame = {
-    val syntheticPath = runDirectory.resolve("data").resolve("synthetic.parquet").toString
-    SyntheticData
-      .build(spark, config)
-      .write
-      .mode("overwrite")
-      .parquet(syntheticPath)
-    spark.read.parquet(syntheticPath)
-  }
-
   private def runQueryPair(
       spark: SparkSession,
       config: BenchmarkConfig,
+      input: DataFrame,
       query: QuerySpec,
       inputRows: Long
   ): Seq[BenchmarkResult] = {
     println(s"Running ${query.name}")
 
     val (exactDf, exactRuntimeMs) =
-      timedQuery(spark, query.exactSql(SyntheticData.ViewName))
+      timedQuery(spark, query.exactSql(DatasetLoader.ViewName))
 
-    val exactResult = Metrics.exactResult(query, exactDf, inputRows, exactRuntimeMs)
+    val exactResult = Metrics.exactResult(config.dataset, query, exactDf, inputRows, exactRuntimeMs)
     val approximateResults = approximateMethods(config).map { method =>
-      val (approxDf, approxRuntimeMs) = timedQuery(spark, method.sql(query))
+      val (approxDf, approxRuntimeMs) = method.run(spark, input, query)
       Metrics.approximateResult(
         spark = spark,
+        dataset = config.dataset,
         query = query,
         method = method.name,
         exactDf = exactDf,
@@ -93,29 +80,47 @@ object BenchmarkRunner {
     Seq(
       ApproxMethod(
         name = "spark_approx_count_distinct",
-        sql = _.approxSql(SyntheticData.ViewName, config.relativeSd),
+        run = (spark, _, query) => timedQuery(spark, query.approxSql(DatasetLoader.ViewName, config.relativeSd)),
         relativeSd = Some(config.relativeSd),
         notes = "Spark built-in HLL++ approximation"
       ),
       ApproxMethod(
-        name = "datasketches_theta",
-        sql = _.sketchSql(SyntheticData.ViewName, SketchFunctions.ThetaFunctionName),
+        name = "datasketches_theta_udaf",
+        run = (spark, _, query) => timedQuery(spark, query.sketchSql(DatasetLoader.ViewName, SketchFunctions.ThetaFunctionName)),
         relativeSd = None,
-        notes = s"Apache DataSketches Theta sketch; lgK=${config.thetaLgK}"
+        notes = s"Apache DataSketches Theta direct UDAF; lgK=${config.thetaLgK}"
       ),
       ApproxMethod(
-        name = "datasketches_hll",
-        sql = _.sketchSql(SyntheticData.ViewName, SketchFunctions.HllFunctionName),
+        name = "datasketches_hll_udaf",
+        run = (spark, _, query) => timedQuery(spark, query.sketchSql(DatasetLoader.ViewName, SketchFunctions.HllFunctionName)),
         relativeSd = None,
-        notes = s"Apache DataSketches HLL sketch; lgK=${config.hllLgK}"
+        notes = s"Apache DataSketches HLL direct UDAF; lgK=${config.hllLgK}"
+      ),
+      ApproxMethod(
+        name = "datasketches_theta_partitioned",
+        run = (spark, input, query) =>
+          timedDataFrame(PartitionedSketches.estimate(spark, input, query, PartitionedSketches.Theta, config.thetaLgK)),
+        relativeSd = None,
+        notes = s"Apache DataSketches Theta partition-level sketching; lgK=${config.thetaLgK}"
+      ),
+      ApproxMethod(
+        name = "datasketches_hll_partitioned",
+        run = (spark, input, query) =>
+          timedDataFrame(PartitionedSketches.estimate(spark, input, query, PartitionedSketches.Hll, config.hllLgK)),
+        relativeSd = None,
+        notes = s"Apache DataSketches HLL partition-level sketching; lgK=${config.hllLgK}"
       )
     )
 
   private def timedQuery(spark: SparkSession, sqlText: String): (DataFrame, Long) = {
+    timedDataFrame(spark.sql(sqlText))
+  }
+
+  private def timedDataFrame(df: => DataFrame): (DataFrame, Long) = {
     val startNs = System.nanoTime()
-    val df = spark.sql(sqlText).cache()
-    df.count()
+    val computed = df.cache()
+    computed.count()
     val elapsedMs = (System.nanoTime() - startNs) / 1000000L
-    (df, elapsedMs)
+    (computed, elapsedMs)
   }
 }

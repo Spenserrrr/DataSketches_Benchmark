@@ -5,6 +5,7 @@ import org.apache.spark.sql.functions._
 
 object Metrics {
   def exactResult(
+      dataset: String,
       query: QuerySpec,
       exactDf: DataFrame,
       inputRows: Long,
@@ -13,7 +14,7 @@ object Metrics {
     if (query.groupColumns.isEmpty) {
       val exact = readCount(exactDf.first())
       BenchmarkResult(
-        dataset = "synthetic",
+        dataset = dataset,
         queryName = query.name,
         method = "exact_spark_sql",
         inputRows = inputRows,
@@ -31,7 +32,7 @@ object Metrics {
     } else {
       val summary = groupedExactSummary(exactDf)
       BenchmarkResult(
-        dataset = "synthetic",
+        dataset = dataset,
         queryName = query.name,
         method = "exact_spark_sql",
         inputRows = inputRows,
@@ -51,6 +52,7 @@ object Metrics {
 
   def approximateResult(
       spark: SparkSession,
+      dataset: String,
       query: QuerySpec,
       method: String,
       exactDf: DataFrame,
@@ -65,7 +67,7 @@ object Metrics {
       val approx = readCount(approxDf.first())
       val error = relativeError(approx, exact)
       BenchmarkResult(
-        dataset = "synthetic",
+        dataset = dataset,
         queryName = query.name,
         method = method,
         inputRows = inputRows,
@@ -83,7 +85,7 @@ object Metrics {
     } else {
       val summary = groupedApproxSummary(spark, query, exactDf, approxDf)
       BenchmarkResult(
-        dataset = "synthetic",
+        dataset = dataset,
         queryName = query.name,
         method = method,
         inputRows = inputRows,

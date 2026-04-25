@@ -25,8 +25,10 @@ final case class QuerySpec(
 }
 
 object BenchmarkQueries {
-  val BaselineQueries: Seq[QuerySpec] = Seq(
+  val AllQueries: Seq[QuerySpec] = Seq(
     QuerySpec(name = "global_distinct", groupColumns = Seq.empty),
-    QuerySpec(name = "grouped_distinct", groupColumns = Seq("group_id"))
+    QuerySpec(name = "grouped_distinct", groupColumns = Seq("group_id")),
+    QuerySpec(name = "time_window_distinct", groupColumns = Seq("date_bucket")),
+    QuerySpec(name = "multi_group_distinct", groupColumns = Seq("date_bucket", "group_id"))
   )
 }
