@@ -4,7 +4,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 
 import benchmark.sketch.PartitionedSketches
-import benchmark.{BenchmarkConfig, Metrics, QuerySpec}
+import benchmark.{BenchmarkConfig, Metrics, QuerySpec, RuntimeStats}
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
 
@@ -22,12 +22,13 @@ object MaterializationBenchmark {
       config: BenchmarkConfig,
       input: DataFrame,
       inputRows: Long,
-      exactQueries: Map[String, (DataFrame, Long)],
+      exactQueries: Map[String, (DataFrame, RuntimeStats)],
       queries: Seq[QuerySpec],
       runDirectory: Path
   ): Path = {
     val materializedRoot = runDirectory.resolve("materialized_sketches")
     Files.createDirectories(materializedRoot)
+    val rawInputSizeBytes = directorySizeBytes(runDirectory.resolve("data").resolve(s"${config.dataset}.parquet"))
 
     val sketchConfigs = Seq(
       SketchConfig("theta", PartitionedSketches.Theta, config.thetaLgK),
@@ -35,7 +36,7 @@ object MaterializationBenchmark {
     )
 
     val results = sketchConfigs.flatMap { sketchConfig =>
-      runForSketch(spark, config, input, inputRows, exactQueries, queries, materializedRoot, sketchConfig)
+      runForSketch(spark, config, input, inputRows, exactQueries, queries, materializedRoot, rawInputSizeBytes, sketchConfig)
     }
 
     val outputPath = runDirectory.resolve("materialization_results.csv")
@@ -49,14 +50,15 @@ object MaterializationBenchmark {
       config: BenchmarkConfig,
       input: DataFrame,
       inputRows: Long,
-      exactQueries: Map[String, (DataFrame, Long)],
+      exactQueries: Map[String, (DataFrame, RuntimeStats)],
       queries: Seq[QuerySpec],
       materializedRoot: Path,
+      rawInputSizeBytes: Long,
       sketchConfig: SketchConfig
   ): Seq[MaterializationResult] = {
     val sketchDir = materializedRoot.resolve(sketchConfig.name)
 
-    val (sketchTable, buildTimeMs) = timedDataFrame {
+    val (sketchTable, buildStats) = timedDataFrame(config, cacheResult = true) {
       PartitionedSketches.buildSketchTable(
         spark = spark,
         input = input,
@@ -68,15 +70,18 @@ object MaterializationBenchmark {
     }
 
     sketchTable.write.mode("overwrite").parquet(sketchDir.toString)
-    val storedSketchTable = spark.read.parquet(sketchDir.toString).cache()
+    val loadedSketchTable = spark.read.parquet(sketchDir.toString)
+    val storedSketchTable = if (config.cacheSketchTable) loadedSketchTable.cache() else loadedSketchTable
     val numSketchRows = storedSketchTable.count()
     val sketchTableSizeBytes = directorySizeBytes(sketchDir)
+    val rawToSketchSizeRatio =
+      if (sketchTableSizeBytes == 0L) 0.0 else rawInputSizeBytes.toDouble / sketchTableSizeBytes.toDouble
     val averageSketchSizeBytes =
       storedSketchTable.agg(avg(length(col("sketch_bytes")).cast("double")).as("avg_sketch_bytes")).first().getAs[Double]("avg_sketch_bytes")
 
     queries.map { query =>
-      val (exactDf, exactRuntimeMs) = exactQueries(query.name)
-      val (estimateDf, sketchQueryTimeMs) = timedDataFrame {
+      val (exactDf, exactRuntimeStats) = exactQueries(query.name)
+      val (estimateDf, sketchQueryStats) = timedDataFrame(config, cacheResult = config.cacheMeasuredResults) {
         PartitionedSketches.estimateFromSketchTable(
           spark = spark,
           sketchTable = storedSketchTable,
@@ -87,7 +92,11 @@ object MaterializationBenchmark {
       }
 
       val summary = Metrics.summarizeApproximation(spark, query, exactDf, estimateDf)
-      val breakEven = breakEvenQueries(buildTimeMs, exactRuntimeMs, sketchQueryTimeMs)
+      val breakEven = breakEvenQueries(buildStats.medianMs, exactRuntimeStats.medianMs, sketchQueryStats.medianMs)
+      val workload5ExactMs = workloadExact(5, exactRuntimeStats)
+      val workload5SketchMs = workloadSketch(5, buildStats, sketchQueryStats)
+      val workload10ExactMs = workloadExact(10, exactRuntimeStats)
+      val workload10SketchMs = workloadSketch(10, buildStats, sketchQueryStats)
 
       MaterializationResult(
         dataset = config.dataset,
@@ -98,11 +107,30 @@ object MaterializationBenchmark {
         numSketchRows = numSketchRows,
         exactCardinality = summary.exactCardinality,
         approximateCardinality = summary.approximateCardinality,
-        buildTimeMs = buildTimeMs,
-        exactQueryTimeMs = exactRuntimeMs,
-        sketchQueryTimeMs = sketchQueryTimeMs,
+        buildTimeMs = buildStats.medianMs,
+        buildMeanMs = buildStats.meanMs,
+        buildMinMs = buildStats.minMs,
+        buildMaxMs = buildStats.maxMs,
+        buildStddevMs = buildStats.stddevMs,
+        exactQueryTimeMs = exactRuntimeStats.medianMs,
+        exactQueryMeanMs = exactRuntimeStats.meanMs,
+        exactQueryMinMs = exactRuntimeStats.minMs,
+        exactQueryMaxMs = exactRuntimeStats.maxMs,
+        exactQueryStddevMs = exactRuntimeStats.stddevMs,
+        sketchQueryTimeMs = sketchQueryStats.medianMs,
+        sketchQueryMeanMs = sketchQueryStats.meanMs,
+        sketchQueryMinMs = sketchQueryStats.minMs,
+        sketchQueryMaxMs = sketchQueryStats.maxMs,
+        sketchQueryStddevMs = sketchQueryStats.stddevMs,
         sketchTableSizeBytes = sketchTableSizeBytes,
         averageSketchSizeBytes = averageSketchSizeBytes,
+        rawInputSizeBytes = rawInputSizeBytes,
+        rawToSketchSizeRatio = rawToSketchSizeRatio,
+        workload5ExactMs = workload5ExactMs,
+        workload5SketchMs = workload5SketchMs,
+        workload10ExactMs = workload10ExactMs,
+        workload10SketchMs = workload10SketchMs,
+        runtimeTrials = sketchQueryStats.trials,
         relativeErrorMean = summary.errorMean,
         relativeErrorMedian = summary.errorMedian,
         relativeErrorP95 = summary.errorP95,
@@ -113,12 +141,30 @@ object MaterializationBenchmark {
     }
   }
 
-  private def timedDataFrame(df: => DataFrame): (DataFrame, Long) = {
-    val startNs = System.nanoTime()
-    val computed = df.cache()
-    computed.count()
-    val elapsedMs = (System.nanoTime() - startNs) / 1000000L
-    (computed, elapsedMs)
+  private def timedDataFrame(config: BenchmarkConfig, cacheResult: Boolean)(df: => DataFrame): (DataFrame, RuntimeStats) = {
+    timeDataFrame(df, config.warmupRuns, config.measurementRuns, cacheResult)
+  }
+
+  private def timeDataFrame(df: => DataFrame, warmups: Int, trials: Int, cacheResult: Boolean): (DataFrame, RuntimeStats) = {
+    val safeWarmups = math.max(warmups, 0)
+    val safeTrials = math.max(trials, 1)
+
+    (0 until safeWarmups).foreach { _ =>
+      df.count()
+    }
+
+    val samples = (0 until safeTrials).map { _ =>
+      val startNs = System.nanoTime()
+      df.count()
+      (System.nanoTime() - startNs) / 1000000L
+    }
+
+    val computed = df
+    if (cacheResult) {
+      computed.cache()
+      computed.count()
+    }
+    (computed, RuntimeStats.from(samples))
   }
 
   private def breakEvenQueries(buildTimeMs: Long, exactQueryTimeMs: Long, sketchQueryTimeMs: Long): String = {
@@ -129,6 +175,12 @@ object MaterializationBenchmark {
       f"${buildTimeMs.toDouble / savedPerQueryMs.toDouble}%.2f"
     }
   }
+
+  private def workloadExact(repeatedQueries: Int, exactStats: RuntimeStats): Long =
+    repeatedQueries.toLong * exactStats.medianMs
+
+  private def workloadSketch(repeatedQueries: Int, buildStats: RuntimeStats, sketchStats: RuntimeStats): Long =
+    buildStats.medianMs + repeatedQueries.toLong * sketchStats.medianMs
 
   private def directorySizeBytes(path: Path): Long = {
     if (!Files.exists(path)) {

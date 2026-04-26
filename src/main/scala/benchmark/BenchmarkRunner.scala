@@ -8,7 +8,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 object BenchmarkRunner {
   private final case class ApproxMethod(
       name: String,
-      run: (SparkSession, DataFrame, QuerySpec) => (DataFrame, Long),
+      run: (SparkSession, DataFrame, QuerySpec) => (DataFrame, RuntimeStats),
       relativeSd: Option[Double],
       notes: String
   )
@@ -30,7 +30,8 @@ object BenchmarkRunner {
 
     try {
       val runDirectory = ResultWriter.createRunDirectory(config.outputRoot)
-      val input = DatasetLoader.loadAndMaterialize(spark, config, runDirectory).cache()
+      val loadedInput = DatasetLoader.loadAndMaterialize(spark, config, runDirectory)
+      val input = if (config.cacheInput) loadedInput.cache() else loadedInput
       val inputRows = input.count()
       input.createOrReplaceTempView(DatasetLoader.ViewName)
 
@@ -46,7 +47,7 @@ object BenchmarkRunner {
         config = config,
         input = input,
         inputRows = inputRows,
-        exactQueries = exactQueries(spark),
+        exactQueries = exactQueries(spark, config),
         queries = BenchmarkQueries.AllQueries,
         runDirectory = runDirectory
       )
@@ -65,12 +66,12 @@ object BenchmarkRunner {
   ): Seq[BenchmarkResult] = {
     println(s"Running ${query.name}")
 
-    val (exactDf, exactRuntimeMs) =
-      timedQuery(spark, query.exactSql(DatasetLoader.ViewName))
+    val (exactDf, exactRuntimeStats) =
+      timedQuery(spark, config, query.exactSql(DatasetLoader.ViewName))
 
-    val exactResult = Metrics.exactResult(config.dataset, query, exactDf, inputRows, exactRuntimeMs)
+    val exactResult = Metrics.exactResult(config.dataset, query, exactDf, inputRows, exactRuntimeStats)
     val approximateResults = approximateMethods(config).map { method =>
-      val (approxDf, approxRuntimeMs) = method.run(spark, input, query)
+      val (approxDf, approxRuntimeStats) = method.run(spark, input, query)
       Metrics.approximateResult(
         spark = spark,
         dataset = config.dataset,
@@ -79,7 +80,7 @@ object BenchmarkRunner {
         exactDf = exactDf,
         approxDf = approxDf,
         inputRows = inputRows,
-        runtimeMs = approxRuntimeMs,
+        runtimeStats = approxRuntimeStats,
         relativeSd = method.relativeSd,
         notes = method.notes
       )
@@ -94,13 +95,13 @@ object BenchmarkRunner {
         Seq(
           ApproxMethod(
             name = "datasketches_theta_udaf",
-            run = (spark, _, query) => timedQuery(spark, query.sketchSql(DatasetLoader.ViewName, SketchFunctions.ThetaFunctionName)),
+            run = (spark, _, query) => timedQuery(spark, config, query.sketchSql(DatasetLoader.ViewName, SketchFunctions.ThetaFunctionName)),
             relativeSd = None,
             notes = s"Apache DataSketches Theta direct UDAF; lgK=${config.thetaLgK}"
           ),
           ApproxMethod(
             name = "datasketches_hll_udaf",
-            run = (spark, _, query) => timedQuery(spark, query.sketchSql(DatasetLoader.ViewName, SketchFunctions.HllFunctionName)),
+            run = (spark, _, query) => timedQuery(spark, config, query.sketchSql(DatasetLoader.ViewName, SketchFunctions.HllFunctionName)),
             relativeSd = None,
             notes = s"Apache DataSketches HLL direct UDAF; lgK=${config.hllLgK}"
           )
@@ -112,41 +113,59 @@ object BenchmarkRunner {
     Seq(
       ApproxMethod(
         name = "spark_approx_count_distinct",
-        run = (spark, _, query) => timedQuery(spark, query.approxSql(DatasetLoader.ViewName, config.relativeSd)),
+        run = (spark, _, query) => timedQuery(spark, config, query.approxSql(DatasetLoader.ViewName, config.relativeSd)),
         relativeSd = Some(config.relativeSd),
         notes = "Spark built-in HLL++ approximation"
       ),
       ApproxMethod(
         name = "datasketches_theta_partitioned",
         run = (spark, input, query) =>
-          timedDataFrame(PartitionedSketches.estimate(spark, input, query, PartitionedSketches.Theta, config.thetaLgK)),
+          timedDataFrame(config)(PartitionedSketches.estimate(spark, input, query, PartitionedSketches.Theta, config.thetaLgK)),
         relativeSd = None,
         notes = s"Apache DataSketches Theta partition-level sketching; lgK=${config.thetaLgK}"
       ),
       ApproxMethod(
         name = "datasketches_hll_partitioned",
         run = (spark, input, query) =>
-          timedDataFrame(PartitionedSketches.estimate(spark, input, query, PartitionedSketches.Hll, config.hllLgK)),
+          timedDataFrame(config)(PartitionedSketches.estimate(spark, input, query, PartitionedSketches.Hll, config.hllLgK)),
         relativeSd = None,
         notes = s"Apache DataSketches HLL partition-level sketching; lgK=${config.hllLgK}"
       )
     ) ++ directUdafMethods
   }
 
-  private def exactQueries(spark: SparkSession): Map[String, (DataFrame, Long)] =
+  private def exactQueries(spark: SparkSession, config: BenchmarkConfig): Map[String, (DataFrame, RuntimeStats)] =
     BenchmarkQueries.AllQueries.map { query =>
-      query.name -> timedQuery(spark, query.exactSql(DatasetLoader.ViewName))
+      query.name -> timedQuery(spark, config, query.exactSql(DatasetLoader.ViewName))
     }.toMap
 
-  private def timedQuery(spark: SparkSession, sqlText: String): (DataFrame, Long) = {
-    timedDataFrame(spark.sql(sqlText))
+  private def timedQuery(spark: SparkSession, config: BenchmarkConfig, sqlText: String): (DataFrame, RuntimeStats) = {
+    timedDataFrame(config)(spark.sql(sqlText))
   }
 
-  private def timedDataFrame(df: => DataFrame): (DataFrame, Long) = {
-    val startNs = System.nanoTime()
-    val computed = df.cache()
-    computed.count()
-    val elapsedMs = (System.nanoTime() - startNs) / 1000000L
-    (computed, elapsedMs)
+  private def timedDataFrame(config: BenchmarkConfig)(df: => DataFrame): (DataFrame, RuntimeStats) = {
+    timeDataFrame(df, config.warmupRuns, config.measurementRuns, config.cacheMeasuredResults)
+  }
+
+  private def timeDataFrame(df: => DataFrame, warmups: Int, trials: Int, cacheResult: Boolean): (DataFrame, RuntimeStats) = {
+    val safeWarmups = math.max(warmups, 0)
+    val safeTrials = math.max(trials, 1)
+
+    (0 until safeWarmups).foreach { _ =>
+      df.count()
+    }
+
+    val samples = (0 until safeTrials).map { _ =>
+      val startNs = System.nanoTime()
+      df.count()
+      (System.nanoTime() - startNs) / 1000000L
+    }
+
+    val computed = df
+    if (cacheResult) {
+      computed.cache()
+      computed.count()
+    }
+    (computed, RuntimeStats.from(samples))
   }
 }
