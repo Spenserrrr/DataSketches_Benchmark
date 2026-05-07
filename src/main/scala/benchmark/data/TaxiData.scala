@@ -16,6 +16,7 @@ object TaxiData {
         col("DOLocationID").cast("int").as("dropoff_location_id")
       )
       .where(
+        // Keep only rows that can form a stable route key and time bucket.
         col("pickup_ts").isNotNull &&
           col("pickup_location_id").isNotNull &&
           col("dropoff_location_id").isNotNull &&
@@ -23,6 +24,7 @@ object TaxiData {
           col("dropoff_location_id") > 0
       )
       .select(
+        // A pickup/dropoff route acts like a user-level distinct key.
         concat(
           lit("route_"),
           col("pickup_location_id").cast("string"),

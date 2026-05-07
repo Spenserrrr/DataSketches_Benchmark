@@ -5,6 +5,7 @@ final case class QuerySpec(
     groupColumns: Seq[String],
     distinctColumn: String = "distinct_key"
 ) {
+  // Generate the same logical query for each implementation.
   def exactSql(tableName: String): String =
     distinctSql(tableName, s"COUNT(DISTINCT $distinctColumn)")
 
@@ -25,6 +26,7 @@ final case class QuerySpec(
 }
 
 object BenchmarkQueries {
+  // These cover no-group, single-group, time rollup, and materialized-grain queries.
   val AllQueries: Seq[QuerySpec] = Seq(
     QuerySpec(name = "global_distinct", groupColumns = Seq.empty),
     QuerySpec(name = "grouped_distinct", groupColumns = Seq("group_id")),

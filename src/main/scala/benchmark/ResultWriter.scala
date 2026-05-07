@@ -23,6 +23,7 @@ object ResultWriter {
   }
 
   private def nextRunDirectory(outputRoot: String): Path = {
+    // Timestamped directories make long benchmark runs resumable and auditable.
     val timestamp = LocalDateTime.now().format(TimestampFormat)
     val root = Paths.get(outputRoot)
     var suffix = 0

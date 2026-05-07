@@ -20,6 +20,7 @@ object DatasetLoader {
       case other       => throw new IllegalArgumentException(s"Unsupported dataset: $other")
     }
 
+    // Persist once so all methods benchmark the same physical input layout.
     val outputPath = runDirectory.resolve("data").resolve(s"$dataset.parquet").toString
     loaded.write.mode("overwrite").parquet(outputPath)
     spark.read.parquet(outputPath)

@@ -11,6 +11,7 @@ results/
 .vscode/
 .history/
 .cache/
+.venv/
 .ivy2/
 .coursier/
 hs_err_pid*

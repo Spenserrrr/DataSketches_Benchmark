@@ -9,6 +9,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
 
 object MaterializationBenchmark {
+  // Store sketches at the finest grain needed by all benchmark query rollups.
   private val MaterializationGroup: Seq[String] = Seq("date_bucket", "group_id")
 
   private final case class SketchConfig(
@@ -172,6 +173,7 @@ object MaterializationBenchmark {
     if (savedPerQueryMs <= 0) {
       "never"
     } else {
+      // Number of repeated queries needed to pay back the one-time build.
       f"${buildTimeMs.toDouble / savedPerQueryMs.toDouble}%.2f"
     }
   }

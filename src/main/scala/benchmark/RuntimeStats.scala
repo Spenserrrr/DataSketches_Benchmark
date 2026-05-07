@@ -15,6 +15,7 @@ object RuntimeStats {
 
     val sorted = samples.sorted
     val size = sorted.size
+    // Median is the headline number because local Spark runs can have outliers.
     val median =
       if (size % 2 == 1) {
         sorted(size / 2)

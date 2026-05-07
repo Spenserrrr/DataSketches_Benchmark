@@ -52,6 +52,7 @@ object PartitionedSketches {
       .select(selectedColumns: _*)
       .rdd
       .mapPartitions { rows =>
+        // Keep sketches mutable within a partition; only serialized bytes cross the shuffle.
         val sketchesByGroup = mutable.HashMap.empty[Vector[Any], MutableSketch]
 
         rows.foreach { row =>
@@ -131,6 +132,7 @@ object PartitionedSketches {
       .select(selectedColumns: _*)
       .rdd
       .mapPartitions { rows =>
+        // Same partition-local path as materialization, but estimates immediately.
         val sketchesByGroup = mutable.HashMap.empty[Vector[Any], MutableSketch]
 
         rows.foreach { row =>
@@ -192,6 +194,7 @@ object PartitionedSketches {
         val key = (0 until groupCount).map(row.get).toVector
         key -> row.getAs[Array[Byte]](groupCount)
       }
+      // Roll up from the materialized grain to the requested query grain.
       .reduceByKey { (left, right) =>
         mergeSketches(sketchType, lgK, left, right)
       }

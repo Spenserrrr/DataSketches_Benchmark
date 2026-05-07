@@ -49,6 +49,7 @@ object BenchmarkConfig {
     )
   }
 
+  // Accept both --flag value and bare boolean flags.
   private def booleanValue(values: Map[String, String], key: String, default: Boolean): Boolean =
     values.get(key).map(_.toLowerCase).map {
       case "true" | "1" | "yes" | "y" => true

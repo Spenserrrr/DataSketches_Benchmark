@@ -102,6 +102,7 @@ object SyntheticData {
       groupId: Column,
       dayId: Column
   ): DataFrame =
+    // Every workload exposes the same columns so query code stays shared.
     base.select(
       col("id"),
       concat(lit("key_"), distinctId.cast("string")).as("distinct_key"),

@@ -186,6 +186,7 @@ object Metrics {
 
     val exactRenamed = exactDf.withColumnRenamed("distinct_count", "exact_count")
     val approxRenamed = approxDf.withColumnRenamed("distinct_count", "approx_count")
+    // Compare errors per output group, then summarize the error distribution.
     val joined = exactRenamed
       .join(approxRenamed, query.groupColumns, "inner")
       .withColumn(

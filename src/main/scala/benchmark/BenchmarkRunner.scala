@@ -30,6 +30,7 @@ object BenchmarkRunner {
 
     try {
       val runDirectory = ResultWriter.createRunDirectory(config.outputRoot)
+      // Force both synthetic and real inputs through Parquet so scan costs are comparable.
       val loadedInput = DatasetLoader.loadAndMaterialize(spark, config, runDirectory)
       val input = if (config.cacheInput) loadedInput.cache() else loadedInput
       val inputRows = input.count()
